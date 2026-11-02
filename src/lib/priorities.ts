@@ -8,6 +8,9 @@ export function parsePriorities(text: string): string[] {
   if (/lecturer|clear|engaging|good professor|teaching/.test(t)) chips.push("Clear lecturer");
   if (/gpa|grade|easy/.test(t)) chips.push("High average GPA");
   if (/full|open seat|enroll/.test(t)) chips.push("Avoid full sections");
+  if (/\bonline\b|remote|zoom|asynchronous/.test(t)) chips.push("Online");
+  if (/in[- ]person|on campus/.test(t)) chips.push("In person");
+  if (/morning/.test(t)) chips.push("Morning classes");
   const load = t.match(/(one|two|three|four|\d)\s+(?:other\s+)?(?:hard|difficult|heavy|tough)/);
   if (load && WORDS[load[1]]) chips.push(`Already taking ${WORDS[load[1]]} hard`);
   return chips;

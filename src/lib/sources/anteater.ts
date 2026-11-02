@@ -1,5 +1,6 @@
 import { cached, HOUR } from "../cache";
-import { courseId, type CourseRef } from "../courses";
+import { courseId, usualQuarters, type CourseRef } from "../courses";
+import type { Mode, Quarter, Term } from "../types";
 
 const BASE = "https://anteaterapi.com/v2/rest";
 
@@ -12,7 +13,7 @@ async function get<T>(path: string): Promise<T> {
 
 // ---------- Terms ----------
 
-export type Term = { year: string; quarter: string; label: string };
+export type { Term };
 
 export function fetchTerms(): Promise<Term[]> {
   return cached("anteater:terms", HOUR, async () => {
@@ -33,13 +34,19 @@ export type OfferedSection = {
   enrolled: number | null;
   capacity: number | null;
   waitlist: number | null;
+  mode: Mode;
 };
+
+// Per instructor, across all their primary sections this term (for the professor picker).
+export type InstructorSections = { sections: number; seats: "Open" | "Full"; mode: Mode };
 
 export type Offering = {
   offered: boolean;
   sections: OfferedSection[]; // lectures/seminars/studios only (not labs/discussions)
   instructors: string[]; // distinct primary instructors this quarter, STAFF removed
   hasStaffOnly: boolean;
+  mode: Mode; // across primary sections
+  byInstructor: Record<string, InstructorSections>;
 };
 
 type WebSocSection = {
@@ -52,6 +59,7 @@ type WebSocSection = {
   numCurrentlyEnrolled: { totalEnrolled: string };
   sectionNum: string;
   units: string;
+  sectionComment?: string;
   meetings: { timeIsTBA: boolean; bldg?: string[]; days?: string; startTime?: Clock; endTime?: Clock }[];
   finalExam: { examStatus: string; month?: number; day?: number; startTime?: Clock; endTime?: Clock };
   isCancelled: boolean;
@@ -72,10 +80,27 @@ const SECONDARY = new Set(["Lab", "Dis", "Qui", "Quiz", "Tap", "Tut", "Act", "Fl
 const num = (v: string | undefined) => (v && v.trim() !== "" && !Number.isNaN(Number(v)) ? Number(v) : null);
 const hhmm = (t?: { hour: number; minute: number }) => (t ? `${t.hour}:${String(t.minute).padStart(2, "0")}` : "");
 
+// WebSoc lists online meetings in building "ON LINE"; async sections are often just TBA, so "unknown" is common.
+const ONLINE_NOTE = /\b(online|remote|zoom|asynchronous)\b/i;
+function sectionMode(s: WebSocSection): Mode {
+  const bldgs = s.meetings.flatMap((m) => m.bldg ?? []).filter((b) => b.trim() !== "" && b.trim().toUpperCase() !== "TBA");
+  if (bldgs.some((b) => b.toUpperCase().includes("ON LINE")) || ONLINE_NOTE.test(s.sectionComment ?? "")) return "online";
+  return bldgs.length ? "in-person" : "unknown";
+}
+
+// Mixed known modes => hybrid; unknown is ignored.
+export function combineModes(modes: Mode[]): Mode {
+  const known = new Set(modes.filter((m) => m !== "unknown"));
+  if (known.has("hybrid") || (known.has("online") && known.has("in-person"))) return "hybrid";
+  return known.has("online") ? "online" : known.has("in-person") ? "in-person" : "unknown";
+}
+
+const seatsOf = (statuses: string[]): "Open" | "Full" => (statuses.length > 0 && statuses.every((st) => st !== "OPEN") ? "Full" : "Open");
+
 export function fetchOffering(course: CourseRef, term: Term): Promise<Offering> {
   return fetchWebSoc(course, term).then((courses) => {
     const all = courses.flatMap((c) => c.sections).filter((s) => !s.isCancelled);
-    if (!all.length) return { offered: false, sections: [], instructors: [], hasStaffOnly: false };
+    if (!all.length) return { offered: false, sections: [], instructors: [], hasStaffOnly: false, mode: "unknown", byInstructor: {} };
 
     const primary = all.filter((s) => !SECONDARY.has(s.sectionType));
     const sections: OfferedSection[] = primary.slice(0, 10).map((s) => {
@@ -90,12 +115,18 @@ export function fetchOffering(course: CourseRef, term: Term): Promise<Offering> 
         enrolled: num(s.numCurrentlyEnrolled?.totalEnrolled),
         capacity: num(s.maxCapacity),
         waitlist: num(s.numOnWaitlist),
+        mode: sectionMode(s),
       };
     });
 
     const names = [...new Set(primary.flatMap((s) => s.instructors))];
     const instructors = names.filter((n) => n.toUpperCase() !== "STAFF");
-    return { offered: true, sections, instructors, hasStaffOnly: names.length > 0 && instructors.length === 0 };
+    const byInstructor: Record<string, InstructorSections> = {};
+    for (const name of instructors) {
+      const mine = primary.filter((s) => s.instructors.includes(name));
+      byInstructor[name] = { sections: mine.length, seats: seatsOf(mine.map((s) => s.status)), mode: combineModes(mine.map(sectionMode)) };
+    }
+    return { offered: true, sections, instructors, hasStaffOnly: names.length > 0 && instructors.length === 0, mode: combineModes(primary.map(sectionMode)), byInstructor };
   });
 }
 
@@ -115,6 +146,7 @@ export type CatalogInfo = {
   prerequisiteText: string;
   recentCourseGPA: { value: number | null; sections: number };
   currentInstructors: InstructorHistory[];
+  usuallyOffered: Quarter[];
 };
 
 type RawSection = {
@@ -132,7 +164,7 @@ export function fetchCatalog(course: CourseRef, currentInstructors: string[]): P
   return cached(`catalog:${courseId(course)}:${currentInstructors.join("|")}`, 6 * HOUR, async () => {
     const dept = encodeURIComponent(course.department);
     const [info, raw] = await Promise.all([
-      get<{ title: string; description: string; minUnits: number; maxUnits: number; prerequisiteText: string }>(`/courses/${encodeURIComponent(courseId(course))}`),
+      get<{ title: string; description: string; minUnits: number; maxUnits: number; prerequisiteText: string; terms?: string[] }>(`/courses/${encodeURIComponent(courseId(course))}`),
       get<RawSection[]>(`/grades/raw?department=${dept}&courseNumber=${encodeURIComponent(course.number)}`).catch(() => [] as RawSection[]),
     ]);
 
@@ -160,6 +192,14 @@ export function fetchCatalog(course: CourseRef, currentInstructors: string[]): P
       prerequisiteText: info.prerequisiteText,
       recentCourseGPA: { value: recentGPA == null ? null : round2(recentGPA), sections: recent.length },
       currentInstructors: history,
+      usuallyOffered: usualQuarters(info.terms ?? []),
     };
   });
+}
+
+// Every term the catalog lists for this course (past and posted), e.g. "2026 Fall", "2025 Summer1".
+export function fetchCourseTerms(course: CourseRef): Promise<string[]> {
+  return cached(`courseTerms:${courseId(course)}`, 24 * HOUR, () =>
+    get<{ terms?: string[] }>(`/courses/${encodeURIComponent(courseId(course))}`).then((c) => c.terms ?? []),
+  ).catch(() => []);
 }

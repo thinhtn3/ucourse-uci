@@ -1,18 +1,22 @@
-import { generateText, Output } from "ai";
+import { APICallError, generateText, Output, RetryError } from "ai";
 import { google } from "@ai-sdk/google";
 import { z } from "zod";
-import { parseCourse, type CourseRef } from "@/lib/courses";
-import { fetchCatalog, fetchOffering, fetchTerms, type Term } from "@/lib/sources/anteater";
+import { cached, HOUR } from "@/lib/cache";
+import { parseCourse, usualQuarters, type CourseRef } from "@/lib/courses";
+import { fetchCatalog, fetchCourseTerms, fetchOffering, fetchTerms, type Offering, type Term } from "@/lib/sources/anteater";
 import { lookupProfessor } from "@/lib/sources/rmp";
-import type { Row, Source, Verdict } from "@/lib/types";
+import { MAX_RANKED, type ApiError, type ProfessorOption, type Quarter, type Result, type Row, type Source, type Verdict } from "@/lib/types";
 // Reddit is a placeholder for now (PullPush rate-limits automated access); re-enable when a source is sorted out.
 // import { searchReddit } from "@/lib/sources/reddit";
 
 export const maxDuration = 300;
 
 // Generous sanity cap (not a product limit): protects the free upstream APIs from a runaway request.
-const MAX_COURSES = 60;
+// Only the first MAX_RANKED are researched and ranked; the rest come back in `skipped`.
+const MAX_COURSES = 200;
 const CONCURRENCY = 5; // courses researched at a time (Anteater allows 1000 requests/hour; RMP is unofficial)
+const BATCH = 15; // courses per model call
+const BATCH_CONCURRENCY = 2;
 
 async function mapPool<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -29,17 +33,21 @@ async function mapPool<T, R>(items: T[], size: number, fn: (item: T) => Promise<
 }
 
 // Gemini (free tier) when GOOGLE_GENERATIVE_AI_API_KEY is set; otherwise the Vercel AI Gateway
-// (needs AI_GATEWAY_API_KEY). RECOMMENDER_MODEL overrides the model id for whichever is active.
-function pickModel() {
-  if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) return google(process.env.RECOMMENDER_MODEL ?? "gemini-2.5-flash");
-  return process.env.RECOMMENDER_MODEL ?? "anthropic/claude-sonnet-5.5";
+// (needs AI_GATEWAY_API_KEY). RECOMMENDER_MODEL / RECOMMENDER_FALLBACK_MODEL override the ids;
+// the fallback is a cheaper model of the same provider, used when the primary is rate-limited or failing.
+function models() {
+  const fallback = process.env.RECOMMENDER_FALLBACK_MODEL;
+  if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    return [google(process.env.RECOMMENDER_MODEL ?? "gemini-2.5-flash"), google(fallback ?? "gemini-2.5-flash-lite")] as const;
+  }
+  return [process.env.RECOMMENDER_MODEL ?? "anthropic/claude-sonnet-5.5", fallback ?? "anthropic/claude-haiku-5.5"] as const;
 }
 
 const Request = z.object({
   courses: z.array(z.string().min(1).max(40)).min(1).max(MAX_COURSES),
   preferences: z.string().max(1000).default(""),
   currentlyTaking: z.array(z.string().min(1).max(40)).max(20).default([]), // in-progress courses, for workload context
-  term: z.object({ year: z.string(), quarter: z.string() }).optional(), // defaults to the latest posted term
+  term: z.union([z.object({ year: z.string(), quarter: z.string() }), z.literal("any")]).optional(), // defaults to the latest posted term
 });
 
 const Recommendation = z.object({
@@ -58,10 +66,28 @@ const Output_ = z.object({
 
 const EVIDENCE = { none: 0, limited: 1, some: 2, strong: 3 } as const;
 
-async function gatherCourse(course: CourseRef, term: Term, compact: boolean) {
-  const offering = await fetchOffering(course, term).catch((e) => ({ error: String(e.message ?? e) }));
-  if ("error" in offering) return { course: course.label, status: "schedule-error" as const, error: offering.error };
-  if (!offering.offered) return { course: course.label, status: "not-offered" as const };
+
+// The first term (latest first) that offers the course. Errors only count if no term could be checked.
+async function findOffering(course: CourseRef, terms: Term[]): Promise<{ term: Term; offering: Offering } | { error: string } | null> {
+  let errors = 0;
+  let last = "";
+  for (const term of terms) {
+    try {
+      const offering = await fetchOffering(course, term);
+      if (offering.offered) return { term, offering };
+    } catch (e) {
+      errors++;
+      last = String(e instanceof Error ? e.message : e);
+    }
+  }
+  return errors === terms.length ? { error: last } : null;
+}
+
+async function gatherCourse(course: CourseRef, terms: Term[], compact: boolean) {
+  const hit = await findOffering(course, terms);
+  if (hit && "error" in hit) return { course: course.label, status: "schedule-error" as const, error: hit.error };
+  if (!hit) return { course: course.label, status: "not-offered" as const };
+  const { term, offering } = hit;
 
   const catalog = await fetchCatalog(course, offering.instructors).catch((e) => ({ error: String(e.message ?? e) }));
   if ("error" in catalog) return { course: course.label, status: "catalog-error" as const, error: catalog.error };
@@ -83,29 +109,57 @@ async function gatherCourse(course: CourseRef, term: Term, compact: boolean) {
     description: compact ? catalog.description.slice(0, 200) : catalog.description,
     units: catalog.units,
     prerequisites: catalog.prerequisiteText,
+    format: offering.mode, // in-person | online | hybrid | unknown, across lectures
     recentCourseGPA: catalog.recentCourseGPA,
     sectionsThisQuarter: offering.sections,
     professorsThisQuarter: professors,
+    instructorCount: offering.instructors.length,
     onlyStaffListed: offering.hasStaffOnly,
+    // Not sent to the model.
+    meta: { term, offering, usuallyOffered: catalog.usuallyOffered },
   };
 }
 
 type Gathered = Awaited<ReturnType<typeof gatherCourse>>;
 type Found = Extract<Gathered, { status: "ok" }>;
+type Assessment = z.infer<typeof Recommendation>;
+
+const fmtRating = (rmp: { rating: number; numRatings: number } | null) => (rmp ? `${rmp.rating.toFixed(1)} (${rmp.numRatings})` : "No ratings");
+const fmtGpa = (gpa: number | null) => (gpa != null ? gpa.toFixed(2) : "No data");
 
 // The table columns come straight from the fetched data (not from the model), so they can't be invented.
-function facts(g: Found): Pick<Row, "code" | "title" | "units" | "instructor" | "rating" | "gpa" | "seats"> {
+function facts(g: Found): Omit<Row, "verdict" | "takeIf" | "avoidIf" | "summary" | "warning" | "evidence" | "assessed"> {
   const profs = g.professorsThisQuarter;
   const lead = profs[0];
   const names = profs.slice(0, 2).map((p) => p.name).join(" / ") + (profs.length > 2 ? ` +${profs.length - 2}` : "");
+  const { term, offering, usuallyOffered } = g.meta;
+  const professors: ProfessorOption[] = profs.map((p) => {
+    const mine = offering.byInstructor[p.name];
+    return {
+      name: p.name,
+      rating: fmtRating(p.rmp),
+      gpa: fmtGpa(p.avgGPA),
+      difficulty: p.rmp?.difficulty ?? null,
+      rmpUrl: p.rmp?.url ?? null,
+      sections: mine?.sections ?? 0,
+      seats: mine?.seats ?? "Open",
+      mode: mine?.mode ?? "unknown",
+    };
+  });
   return {
     code: g.course,
     title: g.title,
     units: g.units,
     instructor: names || (g.onlyStaffListed ? "STAFF" : "Not announced"),
-    rating: lead?.rmp ? `${lead.rmp.rating.toFixed(1)} (${lead.rmp.numRatings})` : "No ratings",
-    gpa: lead?.avgGPA != null ? lead.avgGPA.toFixed(2) : "No data",
+    rating: fmtRating(lead?.rmp ?? null),
+    gpa: fmtGpa(lead?.avgGPA ?? null),
     seats: g.sectionsThisQuarter.length > 0 && g.sectionsThisQuarter.every((s) => s.status !== "OPEN") ? "Full" : "Open",
+    sources: sourcesFor(g, term),
+    term,
+    usuallyOffered,
+    mode: offering.mode,
+    instructorCount: offering.instructors.length,
+    professors,
   };
 }
 
@@ -124,88 +178,200 @@ function sourcesFor(g: Found, term: Term): Source[] {
 
 const key = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+const SYSTEM =
+  "You rank UC Irvine courses for ONE specific quarter. You receive pre-fetched data per course: catalog info, the " +
+  "sections and professors actually teaching THIS quarter (from the live schedule, including whether sections are open or full " +
+  "and the format: in-person, online, hybrid or unknown), each current professor's grade history in this course, and their " +
+  "RateMyProfessors ratings and student reviews. Use ONLY that data; never invent professors, ratings, or opinions, and only mention " +
+  "professors listed for this quarter. A professor with no grade history or no RMP data is new/unknown: say so. If only STAFF is " +
+  "listed, say the instructor isn't announced yet. If only one professor teaches the course this term (instructorCount 1), say " +
+  "'Only one lecturer this quarter' in warning when avoidIf concerns the professor. Rank every course for this student's stated " +
+  "preferences, best fit first, and set evidence honestly (few sections, few ratings, or no RMP data means limited or none). GPA is " +
+  "a proxy for difficulty, not quality. If several candidates satisfy the same requirement, rank them against each other. Keep every " +
+  "line short and concrete; the summary must not repeat the takeIf/avoidIf lines.";
+
+const isAuthError = (err: unknown) => /API key|api_key|unauthori[sz]ed|\b401\b|\b403\b/i.test(err instanceof Error ? err.message : String(err));
+const isRateLimit = (err: unknown): boolean => {
+  if (RetryError.isInstance(err)) return isRateLimit(err.lastError);
+  if (APICallError.isInstance(err) && (err.statusCode === 429 || err.statusCode === 503 || err.statusCode === 529)) return true;
+  return /429|quota|rate.?limit|RESOURCE_EXHAUSTED|overloaded|UNAVAILABLE/i.test(err instanceof Error ? err.message : String(err));
+};
+
+type Ctx = { quarter: string; preferences: string; currentlyTaking: string[] };
+
+// One model call for one batch; the primary with retries, then the cheaper fallback.
+async function callModel(batch: Found[], ctx: Ctx): Promise<Assessment[]> {
+  const [primary, fallback] = models();
+  const data = batch.map(({ meta: _meta, ...g }) => g); // eslint-disable-line @typescript-eslint/no-unused-vars
+  const request = {
+    output: Output.object({ schema: Output_ }),
+    system: SYSTEM,
+    prompt:
+      `Quarter: ${ctx.quarter}\nStudent preferences: ${ctx.preferences || "(none given)"}\n` +
+      `Courses the student is already taking now (consider total workload, do not recommend them): ${ctx.currentlyTaking.join(", ") || "(none given)"}\n\n` +
+      `Course data (JSON):\n${JSON.stringify(data, null, 1)}`,
+  };
+  try {
+    const { output } = await generateText({ ...request, model: primary, maxRetries: 3, abortSignal: AbortSignal.timeout(90_000) });
+    return output.recommendations;
+  } catch (err) {
+    if (isAuthError(err)) throw err;
+    console.warn("primary model failed, trying fallback", err instanceof Error ? err.message : err);
+    const { output } = await generateText({ ...request, model: fallback, maxRetries: 2, abortSignal: AbortSignal.timeout(60_000) });
+    return output.recommendations;
+  }
+}
+
+// Successful batches are cached for an hour, so a retry after a rate limit only re-asks the failed ones.
+function rankBatch(batch: Found[], ctx: Ctx): Promise<Assessment[]> {
+  const parts = [
+    [...new Set(batch.map((g) => g.meta.term.label))].sort().join(","),
+    ctx.preferences.trim().toLowerCase(),
+    [...ctx.currentlyTaking].sort().join(","),
+    batch.map((g) => `${g.course}:${g.professorsThisQuarter.map((p) => p.name).join("/")}`).sort().join(","),
+  ];
+  return cached(`rank:${parts.join("|")}`, HOUR, () => callModel(batch, ctx));
+}
+
+const TIER: Record<Verdict, number> = { take: 0, caveats: 1, skip: 2 };
+
+const fail = (status: number, body: ApiError) => Response.json(body, { status });
+
 async function handle(req: Request) {
   if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.AI_GATEWAY_API_KEY) {
-    return Response.json(
-      { error: "The server has no model API key. Add GOOGLE_GENERATIVE_AI_API_KEY in your hosting environment variables (Vercel: Settings → Environment Variables), then redeploy." },
-      { status: 500 },
-    );
+    return fail(500, {
+      error: "The server has no model API key. Add GOOGLE_GENERATIVE_AI_API_KEY in your hosting environment variables (Vercel: Settings → Environment Variables), then redeploy.",
+      code: "no_key",
+    });
   }
   const parsed = Request.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     const why = parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ");
-    return Response.json({ error: `Invalid request (${why}). Send { courses: string[1-${MAX_COURSES}], preferences?: string, currentlyTaking?: string[<=20] }` }, { status: 400 });
+    return fail(400, {
+      error: `Invalid request (${why}). Send { courses: string[1-${MAX_COURSES}] (up to ${MAX_COURSES} courses; the first ${MAX_RANKED} get ranked), preferences?: string, currentlyTaking?: string[<=20], term?: {year, quarter} | "any" }`,
+      code: "bad_request",
+    });
   }
 
   const refs: CourseRef[] = [];
   const unparsed: string[] = [];
+  const seen = new Set<string>();
   for (const raw of parsed.data.courses) {
     const ref = parseCourse(raw);
-    if (ref) refs.push(ref);
-    else unparsed.push(raw);
+    if (!ref) unparsed.push(raw);
+    else if (!seen.has(ref.label)) {
+      seen.add(ref.label);
+      refs.push(ref);
+    }
   }
-  if (!refs.length) return Response.json({ error: `Couldn't read any course codes (try "ICS 33" or "COMPSCI 161").`, unparsed }, { status: 400 });
+  if (!refs.length) return fail(400, { error: `Couldn't read any course codes (try "ICS 33" or "COMPSCI 161").`, code: "bad_request", unparsed });
+  const skipped = refs.slice(MAX_RANKED).map((r) => r.label);
+  const ranked = refs.slice(0, MAX_RANKED);
 
   const terms = await fetchTerms().catch(() => [] as Term[]);
-  const term = (parsed.data.term && terms.find((t) => t.year === parsed.data.term!.year && t.quarter === parsed.data.term!.quarter)) || terms[0];
-  if (!term) return Response.json({ error: "Couldn't load the quarter schedule right now." }, { status: 502 });
+  const want = parsed.data.term;
+  const any = want === "any";
+  const term = (want && want !== "any" && terms.find((t) => t.year === want.year && t.quarter === want.quarter)) || terms[0];
+  if (!term) return fail(502, { error: "Couldn't load the quarter schedule right now.", code: "upstream" });
+  const resultTerm: Result["term"] = any ? { label: "Any quarter", any: true } : { label: term.label };
 
   // With long lists, send less text per course so the model request stays within free-tier token limits.
-  const compact = refs.length > 12;
-  const gathered = await mapPool(refs, CONCURRENCY, (r) => gatherCourse(r, term, compact));
+  const compact = ranked.length > 12;
+  const gathered = await mapPool(ranked, CONCURRENCY, (r) => gatherCourse(r, any ? terms : [term], compact));
   const found = gathered.filter((g): g is Found => g.status === "ok");
   const notOffered = gathered.filter((g) => g.status === "not-offered").map((g) => g.course);
   const noData = [...gathered.filter((g) => g.status === "schedule-error" || g.status === "catalog-error").map((g) => g.course), ...unparsed];
 
+  // When the courses missing this quarter usually run.
+  const byLabel = new Map(ranked.map((r) => [r.label, r]));
+  const usual = await mapPool(notOffered, CONCURRENCY, async (label) => usualQuarters(await fetchCourseTerms(byLabel.get(label)!)));
+  const usualTerms: Record<string, Quarter[]> = Object.fromEntries(notOffered.map((label, i) => [label, usual[i]]));
+
   // ?raw=1 returns the fetched data without calling the model (handy for dev / checking sources).
-  if (new URL(req.url).searchParams.get("raw") === "1") return Response.json({ term, gathered, notOffered, noData });
+  if (new URL(req.url).searchParams.get("raw") === "1") return Response.json({ term: resultTerm, gathered, notOffered, noData, skipped, usualTerms });
 
   if (!found.length) {
-    return Response.json(
-      { error: notOffered.length ? `None of those courses are offered in ${term.label}: ${notOffered.join(", ")}.` : "No course data found for those codes.", notOffered, noData },
-      { status: 404 },
-    );
+    const where = any ? "any upcoming quarter" : term.label;
+    return fail(404, {
+      error: notOffered.length ? `None of those courses are offered in ${where}: ${notOffered.join(", ")}.` : "No course data found for those codes.",
+      code: "not_found",
+      notOffered,
+      noData,
+      skipped,
+    });
   }
 
-  const { output } = await generateText({
-    model: pickModel(),
-    output: Output.object({ schema: Output_ }),
-    system:
-      "You rank UC Irvine courses for ONE specific quarter. You receive pre-fetched data per course: catalog info, the " +
-      "sections and professors actually teaching THIS quarter (from the live schedule, including whether sections are open or full), " +
-      "each current professor's grade history in this course, and their RateMyProfessors ratings and student reviews. Use ONLY that data; " +
-      "never invent professors, ratings, or opinions, and only mention professors listed for this quarter. A professor with no grade " +
-      "history or no RMP data is new/unknown: say so. If only STAFF is listed, say the instructor isn't announced yet. Rank every course " +
-      "for this student's stated preferences, best fit first, and set evidence honestly (few sections, few ratings, or no RMP data means " +
-      "limited or none). GPA is a proxy for difficulty, not quality. If several candidates satisfy the same requirement, rank them " +
-      "against each other. Keep every line short and concrete; the summary must not repeat the takeIf/avoidIf lines.",
-    prompt:
-      `Quarter: ${term.label}\nStudent preferences: ${parsed.data.preferences || "(none given)"}\n` +
-      `Courses the student is already taking now (consider total workload, do not recommend them): ${parsed.data.currentlyTaking.join(", ") || "(none given)"}\n\n` +
-      `Course data (JSON):\n${JSON.stringify(found, null, 1)}`,
+  const ctx: Ctx = {
+    quarter: any ? "Varies per course (each course's `term` field is the quarter its data comes from)" : term.label,
+    preferences: parsed.data.preferences,
+    currentlyTaking: parsed.data.currentlyTaking,
+  };
+  const batches: Found[][] = [];
+  for (let i = 0; i < found.length; i += BATCH) batches.push(found.slice(i, i + BATCH));
+
+  // A batch that fails on both models keeps its data rows, marked unassessed; auth errors still fail the request.
+  let failedCourses = 0;
+  let rateLimited = false;
+  const assessed = await mapPool(batches, BATCH_CONCURRENCY, async (batch) => {
+    try {
+      return await rankBatch(batch, ctx);
+    } catch (err) {
+      if (isAuthError(err)) throw err;
+      console.error("ranking batch failed", err);
+      failedCourses += batch.length;
+      rateLimited ||= isRateLimit(err);
+      return [] as Assessment[];
+    }
   });
 
-  // Merge: the model's order and judgment + the facts we fetched. Never drop a course the model forgot.
-  const byKey = new Map(found.map((g) => [key(g.course), g]));
-  const rows: Row[] = [];
-  for (const r of output.recommendations) {
-    const g = byKey.get(key(r.course));
-    if (!g) continue;
-    byKey.delete(key(r.course));
-    rows.push({ ...facts(g), verdict: r.verdict as Verdict, takeIf: r.takeIf, avoidIf: r.avoidIf, summary: r.summary, warning: r.warning.trim(), evidence: EVIDENCE[r.evidence], sources: sourcesFor(g, term) });
-  }
-  for (const g of byKey.values()) {
-    rows.push({ ...facts(g), verdict: "caveats", takeIf: [], avoidIf: [], summary: "The ranking didn't return an assessment for this course.", warning: "", evidence: 0, sources: sourcesFor(g, term) });
-  }
+  // Merge: the model's judgment + the facts we fetched. Never drop a course the model forgot.
+  type Ranked = { row: Row; order: number };
+  const merged: Ranked[] = [];
+  batches.forEach((batch, b) => {
+    const byKey = new Map(batch.map((g) => [key(g.course), g]));
+    const recs = assessed[b];
+    recs.forEach((r, i) => {
+      const g = byKey.get(key(r.course));
+      if (!g) return;
+      byKey.delete(key(r.course));
+      merged.push({
+        row: { ...facts(g), verdict: r.verdict as Verdict, takeIf: r.takeIf, avoidIf: r.avoidIf, summary: r.summary, warning: r.warning.trim(), evidence: EVIDENCE[r.evidence], assessed: true },
+        order: i / Math.max(recs.length, 1),
+      });
+    });
+    const failed = recs.length === 0;
+    for (const g of byKey.values()) {
+      merged.push({
+        row: {
+          ...facts(g),
+          verdict: "caveats",
+          takeIf: [],
+          avoidIf: [],
+          summary: failed ? `Couldn't get an assessment right now${rateLimited ? " (model rate limit)" : ""}. The data above is still current.` : "The ranking didn't return an assessment for this course.",
+          warning: "",
+          evidence: 0,
+          assessed: false,
+        },
+        order: 1,
+      });
+    }
+  });
+  // One batch keeps the model's order; several are merged by verdict tier, then position within the batch.
+  const sorted = batches.length === 1 ? merged : [...merged].sort((a, b) => Number(b.row.assessed) - Number(a.row.assessed) || TIER[a.row.verdict] - TIER[b.row.verdict] || a.order - b.order);
+  const rows = sorted.map((r) => r.row);
 
-  return Response.json({ term, rows, notOffered, noData });
+  const result: Result = { term: resultTerm, rows, notOffered, noData, skipped, usualTerms };
+  if (failedCourses) {
+    result.notice = `${failedCourses} course${failedCourses === 1 ? "" : "s"} couldn't be assessed${rateLimited ? " (model rate limit)" : ""}. Showing their data only.`;
+  }
+  return Response.json(result);
 }
 
-function describe(err: unknown): string {
+function describe(err: unknown): ApiError {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg)) return "The model's rate limit was hit. Wait a minute and try again, or rank fewer courses.";
-  if (/API key|api_key|permission|unauthori[sz]ed|401|403/i.test(msg)) return "The model rejected the server's API key. Check the key in your environment variables.";
-  return `Ranking failed: ${msg.slice(0, 200)}`;
+  if (isRateLimit(err)) return { error: "The model's rate limit was hit. Wait a minute and try again, or rank fewer courses.", code: "rate_limit" };
+  if (isAuthError(err) || /permission/i.test(msg)) return { error: "The model rejected the server's API key. Check the key in your environment variables.", code: "no_key" };
+  return { error: `Ranking failed: ${msg.slice(0, 200)}`, code: "server" };
 }
 
 export async function POST(req: Request) {
@@ -213,7 +379,7 @@ export async function POST(req: Request) {
     return await handle(req);
   } catch (err) {
     console.error("recommend failed", err);
-    return Response.json({ error: describe(err) }, { status: 500 });
+    return fail(500, describe(err));
   }
 }
 

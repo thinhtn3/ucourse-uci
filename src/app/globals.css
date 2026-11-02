@@ -117,3 +117,42 @@ textarea::placeholder {
 .bar-cell:focus-within {
   outline: 2px solid var(--accent);
 }
+
+/* "Your plan" badge pulses when a course is added. */
+@keyframes plan-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--accent) 70%, transparent);
+  }
+  40% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+.plan-pulse {
+  animation: plan-pulse 700ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.toast-in {
+  animation: toast-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-pulse,
+  .toast-in {
+    animation: none;
+  }
+}

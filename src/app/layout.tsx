@@ -7,7 +7,8 @@ const jetbrains = JetBrains_Mono({ variable: "--font-jb", subsets: ["latin"], we
 
 export const metadata: Metadata = {
   title: "UCI Course Recommender",
-  description: "Ranks the courses you're deciding between using who's teaching, student ratings and grade history",
+  description:
+    "Ranks the UC Irvine courses you're deciding between using who's teaching, student ratings, grade history and open seats, then builds your quarter plan.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
