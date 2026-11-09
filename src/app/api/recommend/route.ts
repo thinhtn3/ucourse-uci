@@ -58,6 +58,15 @@ const Recommendation = z.object({
   summary: z.string().describe("One or two sentences: the overall call for this student, tying the evidence to what they asked for"),
   warning: z.string().describe("One short warning (full section, prerequisite, required course, workload) or an empty string"),
   evidence: z.enum(["none", "limited", "some", "strong"]).describe("How much data backs this call"),
+  professors: z
+    .array(
+      z.object({
+        name: z.string().describe("Exact name from professorsThisQuarter"),
+        verdict: z.enum(["take", "caveats", "skip"]).describe("Verdict for taking the course with this professor, grounded in their own data"),
+        note: z.string().describe("One short line on why, from this professor's own data"),
+      }),
+    )
+    .describe("Every professor teaching this course this quarter (exact name from professorsThisQuarter), best fit first, each with their own verdict and one short line why; empty if only STAFF"),
 });
 
 const Output_ = z.object({
@@ -128,14 +137,20 @@ const fmtRating = (rmp: { rating: number; numRatings: number } | null) => (rmp ?
 const fmtGpa = (gpa: number | null) => (gpa != null ? gpa.toFixed(2) : "No data");
 
 // The table columns come straight from the fetched data (not from the model), so they can't be invented.
-function facts(g: Found): Omit<Row, "verdict" | "takeIf" | "avoidIf" | "summary" | "warning" | "evidence" | "assessed"> {
+function facts(g: Found, r?: Assessment): Omit<Row, "verdict" | "takeIf" | "avoidIf" | "summary" | "warning" | "evidence" | "assessed"> {
   const profs = g.professorsThisQuarter;
   const lead = profs[0];
   const names = profs.slice(0, 2).map((p) => p.name).join(" / ") + (profs.length > 2 ? ` +${profs.length - 2}` : "");
   const { term, offering, usuallyOffered } = g.meta;
-  const professors: ProfessorOption[] = profs.map((p) => {
+  const norm = (n: string) => n.toLowerCase().replace(/\s+/g, " ").trim();
+  const opinions = new Map<string, { verdict: Verdict; note: string }>();
+  for (const o of r?.professors ?? []) if (!opinions.has(norm(o.name))) opinions.set(norm(o.name), { verdict: o.verdict as Verdict, note: o.note.trim() });
+  const rankOf = (n: string) => [...opinions.keys()].indexOf(norm(n));
+  const options: ProfessorOption[] = profs.map((p) => {
     const mine = offering.byInstructor[p.name];
+    const op = opinions.get(norm(p.name));
     return {
+      ...(op && { verdict: op.verdict, note: op.note }),
       name: p.name,
       rating: fmtRating(p.rmp),
       gpa: fmtGpa(p.avgGPA),
@@ -146,13 +161,20 @@ function facts(g: Found): Omit<Row, "verdict" | "takeIf" | "avoidIf" | "summary"
       mode: mine?.mode ?? "unknown",
     };
   });
+  // Best first: verdict tier, then the model's order; professors the model omitted go last.
+  const professors = options
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => (a.o.verdict ? TIER[a.o.verdict] : 3) - (b.o.verdict ? TIER[b.o.verdict] : 3) || (rankOf(a.o.name) - rankOf(b.o.name)) || a.i - b.i)
+    .map((x) => x.o);
+  const top = professors[0];
+  const topProf = profs.find((p) => p.name === top?.name) ?? lead;
   return {
     code: g.course,
     title: g.title,
     units: g.units,
-    instructor: names || (g.onlyStaffListed ? "STAFF" : "Not announced"),
-    rating: fmtRating(lead?.rmp ?? null),
-    gpa: fmtGpa(lead?.avgGPA ?? null),
+    instructor: (topProf && profs.length > 1 ? [topProf, ...profs.filter((p) => p !== topProf)].slice(0, 2).map((p) => p.name).join(" / ") + (profs.length > 2 ? ` +${profs.length - 2}` : "") : names) || (g.onlyStaffListed ? "STAFF" : "Not announced"),
+    rating: fmtRating(topProf?.rmp ?? null),
+    gpa: fmtGpa(topProf?.avgGPA ?? null),
     seats: g.sectionsThisQuarter.length > 0 && g.sectionsThisQuarter.every((s) => s.status !== "OPEN") ? "Full" : "Open",
     sources: sourcesFor(g, term),
     term,
@@ -184,11 +206,13 @@ const SYSTEM =
   "and the format: in-person, online, hybrid or unknown), each current professor's grade history in this course, and their " +
   "RateMyProfessors ratings and student reviews. Use ONLY that data; never invent professors, ratings, or opinions, and only mention " +
   "professors listed for this quarter. A professor with no grade history or no RMP data is new/unknown: say so. If only STAFF is " +
-  "listed, say the instructor isn't announced yet. If only one professor teaches the course this term (instructorCount 1), say " +
-  "'Only one lecturer this quarter' in warning when avoidIf concerns the professor. Rank every course for this student's stated " +
+  "listed, say the instructor isn't announced yet. Do not mention that only one professor or lecturer teaches the course. Rank every course for this student's stated " +
   "preferences, best fit first, and set evidence honestly (few sections, few ratings, or no RMP data means limited or none). GPA is " +
   "a proxy for difficulty, not quality. If several candidates satisfy the same requirement, rank them against each other. Keep every " +
-  "line short and concrete; the summary must not repeat the takeIf/avoidIf lines.";
+  "line short and concrete; the summary must not repeat the takeIf/avoidIf lines. For each course, fill `professors` with every " +
+  "professor in professorsThisQuarter (exact names), best fit first, each with their own verdict and a one-line note grounded in THAT " +
+  "professor's own grade history and ratings (not blended with the others). The course-level verdict is the verdict for the best " +
+  "professor option, and takeIf/avoidIf describe that option. With one professor, professors has just that person; with only STAFF, leave it empty.";
 
 const isAuthError = (err: unknown) => /API key|api_key|unauthori[sz]ed|\b401\b|\b403\b/i.test(err instanceof Error ? err.message : String(err));
 const isRateLimit = (err: unknown): boolean => {
@@ -230,7 +254,7 @@ function rankBatch(batch: Found[], ctx: Ctx): Promise<Assessment[]> {
     [...ctx.currentlyTaking].sort().join(","),
     batch.map((g) => `${g.course}:${g.professorsThisQuarter.map((p) => p.name).join("/")}`).sort().join(","),
   ];
-  return cached(`rank:${parts.join("|")}`, HOUR, () => callModel(batch, ctx));
+  return cached(`rank3:${parts.join("|")}`, HOUR, () => callModel(batch, ctx));
 }
 
 const TIER: Record<Verdict, number> = { take: 0, caveats: 1, skip: 2 };
@@ -335,7 +359,7 @@ async function handle(req: Request) {
       if (!g) return;
       byKey.delete(key(r.course));
       merged.push({
-        row: { ...facts(g), verdict: r.verdict as Verdict, takeIf: r.takeIf, avoidIf: r.avoidIf, summary: r.summary, warning: r.warning.trim(), evidence: EVIDENCE[r.evidence], assessed: true },
+        row: { ...facts(g, r), verdict: r.verdict as Verdict, takeIf: r.takeIf, avoidIf: r.avoidIf, summary: r.summary, warning: r.warning.trim(), evidence: EVIDENCE[r.evidence], assessed: true },
         order: i / Math.max(recs.length, 1),
       });
     });

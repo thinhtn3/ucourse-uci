@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 // Toggle chips for "What matters". Each adds or removes a fixed phrase in the free-text box.
 export const PRESETS = [
@@ -36,7 +36,7 @@ export function Presets({ prefText, onChange, compact }: { prefText: string; onC
               active ? "border-transparent bg-chip-pref text-chip-pref-fg" : "border-dashed border-line-btn bg-transparent text-fg-3 hover:border-accent"
             }`}
           >
-            {active ? "✓ " : "+ "}
+            <span aria-hidden>{active ? "✓ " : "+ "}</span>
             {p.label}
           </button>
         );
@@ -105,28 +105,52 @@ export function InfoTip({ label, children }: { label: string; children: ReactNod
     const width = Math.min(280, window.innerWidth - 32);
     setPos({ top: r.bottom + 8, left: Math.max(16, Math.min(r.left - 12, window.innerWidth - width - 16)) });
   };
-  const hide = () => setPos(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hide = () => {
+    clearTimeout(hideTimer.current);
+    setPos(null);
+  };
+  // Pointer leaving waits a beat so the tooltip itself can be hovered (WCAG 1.4.13).
+  const hideSoon = () => {
+    clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setPos(null), 200);
+  };
+  const keep = () => clearTimeout(hideTimer.current);
+  useEffect(() => () => clearTimeout(hideTimer.current), []);
   return (
     <>
       <button
         ref={ref}
         type="button"
         aria-label={`About ${label}`}
-        aria-describedby={pos ? id : undefined}
-        onMouseEnter={show}
-        onMouseLeave={hide}
+        aria-describedby={id}
+        onMouseEnter={() => {
+          keep();
+          show();
+        }}
+        onMouseLeave={hideSoon}
         onFocus={show}
         onBlur={hide}
         onClick={() => (pos ? hide() : show())}
-        onKeyDown={(e) => e.key === "Escape" && hide()}
-        className="inline-flex h-[15px] w-[15px] flex-none cursor-help items-center justify-center rounded-full border border-line-btn bg-transparent p-0 align-[-2px] font-serif text-[10px] italic leading-none text-fg-label hover:border-accent hover:text-accent focus-visible:border-accent focus-visible:text-accent"
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && pos) {
+            e.preventDefault();
+            hide();
+          }
+        }}
+        className="relative inline-flex h-[15px] w-[15px] flex-none before:absolute before:-inset-[5px] before:content-[''] cursor-help items-center justify-center rounded-full border border-line-btn bg-transparent p-0 align-[-2px] font-serif text-[10px] italic leading-none text-fg-label hover:border-accent hover:text-accent focus-visible:border-accent focus-visible:text-accent"
       >
         i
       </button>
+      {/* Always in the DOM (hidden) so the description is read the moment the button is focused. */}
+      <span id={id} hidden>
+        {children}
+      </span>
       {pos && (
         <span
-          id={id}
-          role="tooltip"
+          aria-hidden
+          onMouseEnter={keep}
+          onMouseLeave={hideSoon}
           style={{ top: pos.top, left: pos.left }}
           className="fixed z-40 w-[min(280px,calc(100vw-32px))] rounded-lg border border-line-bar bg-panel px-3 py-2 text-left text-[13px] font-normal normal-case leading-snug tracking-normal text-fg-2 shadow-xl"
         >

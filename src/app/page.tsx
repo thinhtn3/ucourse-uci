@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { CourseInput } from "@/components/course-input";
 import { DegreeWorksDialog } from "@/components/degreeworks-dialog";
 import { Extras, GettingStarted, InfoTip, Presets, TIPS } from "@/components/page-home";
-import { Results, type ModeFilter } from "@/components/page-results";
+import { Results, SideNotes, type ModeFilter } from "@/components/page-results";
 import { Toast, type ToastState } from "@/components/page-toast";
 import { Planner } from "@/components/planner";
 import { parseCourse, type CourseRef } from "@/lib/courses";
@@ -30,7 +30,6 @@ export default function Home() {
   const [result, setResult] = useState<Result | null>(null);
   const [understood, setUnderstood] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
-  const [picked, setPicked] = useState<Record<string, string>>({}); // course code -> professor name
   const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
   const [feedback, setFeedback] = useState("");
   const [importOpen, setImportOpen] = useState(false);
@@ -66,7 +65,7 @@ export default function Home() {
     const id = setTimeout(() => {
       setToast(null);
       setHighlight(undefined);
-    }, 3000);
+    }, 6000); // long enough to reach "View plan"; the header Your plan button is the persistent alternative
     return () => clearTimeout(id);
   }, [toast]);
 
@@ -85,20 +84,21 @@ export default function Home() {
   const rowTermLabel = (r: Row) => r.term?.label ?? labelOf(planCurrent);
   const inPlan = (r: Row) => (plans[rowKey(r)] ?? []).some((p) => p.code === r.code);
 
-  const toItem = (r: Row): PlanItem => {
+  const toItem = (r: Row, chosen?: string): PlanItem => {
     const profs = r.professors ?? [];
-    const instructor = picked[r.code] ?? (profs.length === 1 ? profs[0].name : undefined);
+    // Default: the only professor, or the model's top-ranked one (professors[0] once assessed).
+    const instructor = chosen ?? (profs.length === 1 || profs[0]?.verdict ? profs[0].name : undefined);
     return { code: r.code, title: r.title, units: r.units, ...(instructor && { instructor }) };
   };
 
-  function addToPlan(rows: Row[]) {
+  function addToPlan(rows: Row[], chosen?: string) {
     const next = { ...plans };
     const added: Row[] = [];
     for (const r of rows) {
       const k = rowKey(r);
       const list = next[k] ?? [];
       if (list.some((p) => p.code === r.code)) continue;
-      next[k] = [...list, toItem(r)];
+      next[k] = [...list, toItem(r, chosen)];
       added.push(r);
     }
     if (!added.length) return;
@@ -109,6 +109,16 @@ export default function Home() {
     setHighlight(added[added.length - 1].code);
     setPulse((p) => p + 1);
   }
+  // Plan the course with a specific professor (replaces an existing entry for the course; toggles off if already that professor).
+  function planWithProfessor(r: Row, name: string) {
+    const k = rowKey(r);
+    const list = plans[k] ?? [];
+    const existing = list.find((p) => p.code === r.code);
+    if (existing?.instructor === name) return setPlans({ ...plans, [k]: list.filter((p) => p.code !== r.code) });
+    if (!existing) return addToPlan([r], name);
+    setPlans({ ...plans, [k]: list.map((p) => (p.code === r.code ? toItem(r, name) : p)) });
+  }
+  const planInstructor = (r: Row) => (plans[rowKey(r)] ?? []).find((p) => p.code === r.code)?.instructor;
   const removeFromPlan = (code: string, from: string) => setPlans({ ...plans, [from]: (plans[from] ?? []).filter((p) => p.code !== code) });
   const moveInPlan = (code: string, from: string, to: string) => {
     const item = (plans[from] ?? []).find((p) => p.code === code);
@@ -164,7 +174,6 @@ export default function Home() {
         });
       } else {
         setResult({ notOffered: [], noData: [], skipped: [], usualTerms: {}, ...body } as Result);
-        setPicked({});
       }
     } catch {
       setResult(null);
@@ -183,7 +192,6 @@ export default function Home() {
     setError(null);
     setUnderstood([]);
     setOpen(null);
-    setPicked({});
     setFeedback("");
     setStatus("idle");
   }
@@ -224,10 +232,22 @@ export default function Home() {
   const cellLabel = "text-[11px] uppercase tracking-[0.05em] text-fg-label";
   // After a search, the bar becomes a left sidebar (stacked fields) on large screens.
   const side = !empty;
+  // Wide screens after a search: the page is one fixed screen, only the course list and sidebar scroll.
+  useEffect(() => {
+    if (!side) return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const apply = () => document.documentElement.classList.toggle("lock-scroll", mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => {
+      mq.removeEventListener("change", apply);
+      document.documentElement.classList.remove("lock-scroll");
+    };
+  }, [side]);
   // Sidebar: each field is its own card instead of one joined bar.
-  const cell = side ? "lg:flex-none lg:rounded-xl lg:border lg:border-line-bar" : "";
+  const cell = side ? "lg:flex-none lg:rounded-xl lg:border lg:border-line-input" : "";
   return (
-    <div className={`min-h-screen transition-[padding] duration-200 motion-reduce:transition-none ${planOpen ? "xl:pr-[420px]" : ""}`}>
+    <div className={`${side ? "min-h-screen lg:flex lg:h-screen lg:flex-col lg:overflow-hidden" : "min-h-screen"} transition-[padding] duration-200 motion-reduce:transition-none ${planOpen ? "xl:pr-[420px]" : ""}`}>
       <header className="flex items-center justify-between gap-4 border-b border-line px-4 py-4 sm:px-8">
         <div className="flex items-baseline gap-3">
           <Link
@@ -266,21 +286,22 @@ export default function Home() {
       <main
         className={`mx-auto px-4 pb-16 sm:px-8 ${
           // Sidebar mode spans the full width so its edges line up with the header (px-4 / sm:px-8)
-          side ? "lg:grid lg:grid-cols-[300px_minmax(0,1fr)] lg:items-start lg:gap-8" : "max-w-[1040px]"
+          side ? "w-full lg:grid lg:min-h-0 lg:flex-1 lg:grid-cols-[300px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:gap-8 lg:pb-0" : "max-w-[1040px]"
         }`}
       >
         {/* Command bar */}
         <div
-          className={`sticky top-0 z-[2] flex flex-col gap-4 bg-page ${
-            empty ? "pb-6 pt-12 sm:pt-[64px]" : "pb-2 pt-5 lg:max-h-screen lg:overflow-y-auto lg:pb-6"
+          className={`z-[2] flex flex-col gap-4 bg-page lg:sticky lg:top-0 ${
+            empty ? "pb-6 pt-12 sm:pt-[64px]" : "pb-2 pt-5 lg:max-h-full lg:overflow-y-auto lg:pb-6"
           }`}
         >
+          {!empty && <h1 className="sr-only">Rank the courses you&apos;re deciding between</h1>}
           {empty && (
             <h1 className="m-0 max-w-[24ch] text-balance text-[30px] font-medium tracking-[-0.01em]">Rank the courses you&apos;re deciding between.</h1>
           )}
 
           <div
-            className={`flex flex-wrap gap-px overflow-hidden rounded-[14px] border border-line-bar bg-line-bar ${
+            className={`flex flex-wrap gap-px overflow-hidden rounded-[14px] border border-line-input bg-line-bar ${
               side ? "lg:flex-col lg:gap-3 lg:overflow-visible lg:rounded-none lg:border-0 lg:bg-transparent" : ""
             }`}
           >
@@ -298,11 +319,11 @@ export default function Home() {
                 className="cursor-pointer border-0 bg-transparent p-0 text-inherit outline-none"
               >
                 {terms.map((t) => (
-                  <option key={t.label} value={keyOf(t)} className="text-black">
+                  <option key={t.label} value={keyOf(t)}>
                     {t.label}
                   </option>
                 ))}
-                <option value={ANY} className="text-black">
+                <option value={ANY}>
                   Any quarter
                 </option>
               </select>
@@ -350,7 +371,7 @@ export default function Home() {
               type="button"
               onClick={() => void rank()}
               disabled={status === "loading"}
-              className={`min-h-14 flex-[1_0_100%] cursor-pointer border-0 bg-accent px-[26px] text-[15px] font-medium text-on-accent disabled:cursor-default disabled:bg-accent-disabled sm:flex-none ${
+              className={`focus-on-accent min-h-14 flex-[1_0_100%] cursor-pointer border-0 bg-accent px-[26px] text-[15px] font-medium text-on-accent disabled:cursor-default disabled:bg-accent-disabled sm:flex-none ${
                 side ? "lg:min-h-12 lg:rounded-xl" : ""
               }`}
             >
@@ -363,6 +384,8 @@ export default function Home() {
           <p aria-live="polite" className={`m-0 text-[13px] text-fg-3 ${feedback && !side ? "" : "sr-only"}`}>
             {feedback}
           </p>
+
+          {side && status !== "loading" && result && <SideNotes result={result} onRankSkipped={() => void rankSkipped()} />}
 
           {inProgress.length > 0 && !side && (
             <p className="m-0 text-sm text-fg-muted">
@@ -382,9 +405,17 @@ export default function Home() {
         )}
 
         {/* Results */}
-        <div className={`min-w-0 ${side ? "lg:pt-5" : ""}`}>
+        <div className={`min-w-0 ${side ? "lg:flex lg:min-h-0 lg:flex-col lg:pt-5" : ""}`}>
+          {/* One always-mounted live region so ranking progress and completion are announced exactly once. */}
+          <p role="status" className="sr-only">
+            {status === "loading"
+              ? `Ranking. Checking who's teaching in ${termLabel}.`
+              : status === "done" && result
+                ? `${plural(result.rows.length, "course")} ranked.${result.notice ? ` ${result.notice}` : ""}`
+                : ""}
+          </p>
           {status === "loading" && (
-            <p role="status" className="pt-6 text-fg-muted">
+            <p className="pt-6 text-fg-muted">
               Checking who&apos;s teaching in {termLabel} and what students say about them…
             </p>
           )}
@@ -410,8 +441,8 @@ export default function Home() {
               understood={understood}
               open={open}
               onToggleOpen={(code) => setOpen((o) => (o === code ? null : code))}
-              picked={picked}
-              onPick={(code, name) => setPicked((p) => ({ ...p, [code]: name }))}
+              planInstructor={planInstructor}
+              onAddWithProfessor={planWithProfessor}
               modeFilter={modeFilter}
               onModeFilter={setModeFilter}
               inPlan={inPlan}

@@ -124,6 +124,30 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
   const electives = dw?.needed.filter((n) => n.kind === "elective").length ?? 0;
   const nothingPicked = pickedReq.size === 0 && pickedOpt.size === 0;
 
+  // Select every listed option in an elective group, or clear them when all are already selected.
+  function toggleAll(i: number, labels: string[]) {
+    setPickedOpt((prev) => {
+      const next = new Set(prev);
+      const keys = labels.map((l) => optKey(i, l));
+      if (keys.every((k) => next.has(k))) keys.forEach((k) => next.delete(k));
+      else keys.forEach((k) => next.add(k));
+      return next;
+    });
+  }
+
+  // Every checkbox currently listed: all required groups plus each elective option that is shown.
+  const allReq = dw ? dw.needed.flatMap((n, i) => (n.kind === "required" ? [i] : [])) : [];
+  const allOpt = dw
+    ? dw.needed.flatMap((n, i) =>
+        n.kind === "required" ? [] : [...n.options.map((o) => o.label), ...(loaded[i]?.options ?? []).map((c) => c.label)].map((l) => optKey(i, l)),
+      )
+    : [];
+  const everythingPicked = allReq.length + allOpt.length > 0 && allReq.every((i) => pickedReq.has(i)) && allOpt.every((k) => pickedOpt.has(k));
+  function toggleEverything() {
+    setPickedReq(new Set(everythingPicked ? [] : allReq));
+    setPickedOpt(new Set(everythingPicked ? [] : allOpt));
+  }
+
   function optionBox(i: number, label: string, title?: string) {
     const k = optKey(i, label);
     return (
@@ -164,7 +188,7 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
           rows={5}
           placeholder="Paste your Degree Works page"
           aria-label="Degree Works text"
-          className="w-full resize-y rounded-[10px] border border-line-bar bg-page p-3 text-sm"
+          className="w-full resize-y rounded-[10px] border border-line-input bg-page p-3 text-sm"
         />
         <button
           type="button"
@@ -175,13 +199,30 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
           Find my remaining courses
         </button>
 
+        {/* Always mounted so the result of "Find my remaining courses" is announced. */}
+        <p role="status" className="sr-only">
+          {dw ? `${plural(dw.needed.length, "requirement")} left, ${plural(electives, "elective group")}, ${dw.inProgress.length} in progress, ${dw.completedCount} completed.` : ""}
+        </p>
+
         {dw && (
           <div className="space-y-3 text-sm">
-            <p className="font-medium" aria-live="polite">
+            <p className="font-medium">
               {plural(dw.needed.length, "requirement")} left · {plural(electives, "elective group")} · {dw.inProgress.length} in progress · {dw.completedCount} completed
             </p>
             {dw.needed.length === 0 && (
               <p className="rounded-lg bg-warn-bg px-3 py-2 text-warn-fg">No remaining courses found. Make sure you copied the whole worksheet.</p>
+            )}
+            {dw.needed.length > 0 && (
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={toggleEverything}
+                  className="rounded-lg border border-line-btn px-3 py-1 text-[13px] text-fg-2 hover:text-fg"
+                >
+                  {everythingPicked ? "Clear everything" : "Select all"}
+                </button>
+                <span className="text-[12px] text-fg-label">Covers every group, including loaded options</span>
+              </div>
             )}
             {dw.needed.length > 0 && (
               <ul className="space-y-2">
@@ -198,6 +239,8 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
                   const l = loaded[i];
                   const filter = (filters[i] ?? "").trim().toLowerCase();
                   const fetched = (l?.options ?? []).filter((c) => !filter || `${c.label} ${c.title}`.toLowerCase().includes(filter));
+                  const shown = [...n.options.map((o) => o.label), ...fetched.map((c) => c.label)];
+                  const allPicked = shown.length > 0 && shown.every((lb) => pickedOpt.has(optKey(i, lb)));
                   const picks = [...pickedOpt].filter((k) => k.startsWith(`${i}|`)).length;
                   return (
                     <li key={i} className="rounded-[10px] border border-line px-3 py-2.5">
@@ -206,6 +249,15 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
                         {picks > 0 && <span className="font-normal text-fg-muted"> · {picks} picked</span>}
                       </p>
                       <p className="mt-0.5 text-[12px] text-fg-label">{n.label}</p>
+                      {shown.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => toggleAll(i, shown)}
+                          className="mt-2 rounded-lg border border-line-btn px-3 py-1 text-[13px] text-fg-2 hover:text-fg"
+                        >
+                          {allPicked ? "Clear group" : filter ? "Select shown in group" : "Select group"}
+                        </button>
+                      )}
                       {n.options.length > 0 && <ul className="mt-2 space-y-1">{n.options.map((o) => optionBox(i, o.label))}</ul>}
                       {n.wildcards.length > 0 && !l && (
                         <button
@@ -216,8 +268,12 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
                           Show options
                         </button>
                       )}
-                      {l?.status === "loading" && <p className="mt-2 text-fg-muted">Loading options…</p>}
-                      {l?.status === "error" && <p className="mt-2 text-warn-fg">Couldn&apos;t load options; add them in Courses instead.</p>}
+                      {l?.status === "loading" && (
+                        <p role="status" className="mt-2 text-fg-muted">
+                          Loading options…
+                        </p>
+                      )}
+                      {l?.status === "error" && <p role="alert" className="mt-2 text-warn-fg">Couldn&apos;t load options; add them in Courses instead.</p>}
                       {l?.status === "ok" && (
                         <div className="mt-2 space-y-2">
                           {l.options.length === 0 && <p className="text-fg-muted">No other matching courses found.</p>}
@@ -228,7 +284,7 @@ export function DegreeWorksDialog({ open, onClose, onUse }: Props) {
                               onChange={(e) => setFilters((p) => ({ ...p, [i]: e.target.value }))}
                               placeholder="Filter by code or title"
                               aria-label="Filter options"
-                              className="w-full rounded-lg border border-line-bar bg-page px-2.5 py-1.5 text-[13px]"
+                              className="w-full rounded-lg border border-line-input bg-page px-2.5 py-1.5 text-[13px]"
                             />
                           )}
                           <ul className="max-h-56 space-y-1 overflow-y-auto">{fetched.map((c) => optionBox(i, c.label, c.title))}</ul>

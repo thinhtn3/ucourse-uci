@@ -11,12 +11,13 @@
   --line-bar: oklch(0.34 0.04 255);
   --line-btn: oklch(0.42 0.04 255);
   --line-quiet: oklch(0.3 0.03 255);
+  --line-input: oklch(0.53 0.04 255); /* input/field boundaries, >= 3:1 on page and panel (WCAG 1.4.11) */
   --fg: oklch(0.95 0.01 255);
   --fg-2: oklch(0.88 0.02 255);
   --fg-3: oklch(0.8 0.03 255);
   --fg-muted: oklch(0.7 0.03 255);
   --fg-label: oklch(0.62 0.03 255);
-  --fg-placeholder: oklch(0.55 0.03 255);
+  --fg-placeholder: oklch(0.62 0.03 255); /* was 0.55: 3.57:1 on panel, now 4.76:1 */
   --accent: oklch(0.78 0.12 240);
   --accent-hover: oklch(0.9 0.08 240);
   --on-accent: oklch(0.18 0.03 255);
@@ -50,6 +51,7 @@
   --color-line-bar: var(--line-bar);
   --color-line-btn: var(--line-btn);
   --color-line-quiet: var(--line-quiet);
+  --color-line-input: var(--line-input);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-fg-3: var(--fg-3);
@@ -106,16 +108,36 @@ textarea::placeholder {
   outline-offset: 2px;
 }
 /* Inside the clipped command bar the ring has to sit inside the cell. */
-.bar-cell :focus-visible,
-.bar-cell:focus-within {
+.bar-cell :focus-visible {
   outline-offset: -2px;
 }
 .bar-cell input:focus-visible,
 .bar-cell select:focus-visible {
   outline: none;
 }
-.bar-cell:focus-within {
+/* The cell shows the ring when its text field or select has keyboard focus (buttons inside keep their own ring). */
+.bar-cell:has(input:focus-visible, select:focus-visible) {
   outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* Rings that would be clipped by an overflow container are drawn inside the control. */
+.focus-inset:focus-visible {
+  outline-offset: -2px;
+}
+/* Buttons filled with the accent colour: an accent ring would vanish, so use the dark text colour inside. */
+.focus-on-accent:focus-visible {
+  outline-color: var(--on-accent);
+  outline-offset: -4px;
+}
+/* Containers focused by script (not tab stops) don't need a ring. */
+[tabindex="-1"]:focus-visible {
+  outline: none;
+}
+
+/* Native option lists: set colours explicitly so they never fall back to dark-on-dark. */
+option {
+  background-color: var(--panel);
+  color: var(--fg);
 }
 
 /* "Your plan" badge pulses when a course is added. */
@@ -155,4 +177,16 @@ textarea::placeholder {
   .toast-in {
     animation: none;
   }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html.lock-scroll,
+html.lock-scroll body {
+  overflow: hidden;
+  height: 100%;
 }

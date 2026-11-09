@@ -18,6 +18,8 @@ export type ProfessorOption = {
   sections: number; // primary sections they teach this term
   seats: "Open" | "Full"; // across their sections
   mode: Mode; // across their sections
+  verdict?: Verdict; // model's verdict for taking the course with this professor (absent if unassessed)
+  note?: string; // one-line reason for that verdict
 };
 
 export type Row = {
@@ -40,7 +42,7 @@ export type Row = {
   usuallyOffered: Quarter[]; // quarters offered in the last 3 years, order Fall, Winter, Spring, Summer
   mode: Mode; // across primary (lecture-type) sections
   instructorCount: number; // distinct non-STAFF instructors this term; 1 => "only one lecturer"
-  professors: ProfessorOption[]; // same order as Row.instructor; [] if STAFF / not announced; professors[0] matches rating/gpa
+  professors: ProfessorOption[]; // same order as Row.instructor; [] if STAFF / not announced; ranked best first (model verdict, then order); professors[0] matches rating/gpa
 };
 
 export type Result = {

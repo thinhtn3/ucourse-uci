@@ -1,34 +1,17 @@
+# Changes: playtest feedback round 2 (Nov 8, 2026)
+
+- **A ranking per professor:** when several professors teach a course (e.g. INF 191A), each gets their own verdict and a one-line reason. The course row just says how many professors teach it; open it to compare them as ranked cards (verdict, rating, GPA, seats, a short reason, and "Add to plan" for each).
+- **Less to read:** an opened row shows the summary, the top reason to take or avoid it, any warning, and Add to plan. "More details" shows the full reasons, evidence and sources.
+- **Plan as PDF:** "Download PDF" is now the main button; "Copy plan" sits next to it.
+- **Accessibility (WCAG 2.2 AA):** visible keyboard focus everywhere, better contrast on placeholders and field borders, screen-reader labels for table columns and new-tab links, focus handling in the plan drawer, larger tap targets, and reduced motion respected.
+
 # Changes: playtest feedback (Nov 1, 2026)
 
-## Search
-- Course search works in any format: `mgmt 30a`, `informatics 43`, `IN4MATX151`, `INF 151`.
-- Suggestions appear as you type. Picked courses become chips, and you can paste a whole list.
-- The full UCI catalog is stored in the app (`src/data/courses.json`), so search is instant. Refresh it each quarter with `npm run sync:courses`.
-
-## Ranking
-- If the AI model hits its rate limit, the app retries, then switches to a backup model. Courses it still can't assess show their data marked "Not assessed" instead of an error.
-- You can enter up to 200 courses. The first 60 get ranked, and the rest get a "Rank these next" button.
-- New "Any quarter" option, an online / in-person filter, and a professor picker when several professors teach a course.
-- Rows show when a course is usually offered, and flag when only one lecturer teaches it.
-
-## Home page
-- ⓘ tooltips explain each box (Term, Courses, What matters).
-- Preset chips for "What matters": Easy A, Good lecturer, Light workload, Online, In person.
-- One-line instructions for the DegreeWorks import (select all, copy, paste).
-- A 5-step "Getting started" guide.
-
-## Results and plan
-- After ranking, the search fields move to a left sidebar.
-- A legend explains Take it / Take with caveats / Skip.
-- Rows are more clearly clickable ("Reviews ›").
-- The "Your plan" button is bigger, shows a count, and confirms each course you add.
-- The plan can be copied or downloaded as a CSV.
-
-## DegreeWorks import
-- Picks up electives, "A or B" choices, wildcards (`IN4MATX 1@`) and ranges (`COMPSCI 113:199`).
-- Notes that the worksheet is read in your browser and never uploaded.
-
-## Not included
-- Multi-quarter "graduate on time" planning
-- Friends' schedules
-- A shared cache such as Redis. The current cache lives in server memory and resets on restart.
+- **Easier search:** type courses any way (`informatics 43`, `mgmt 30a`) and pick from suggestions as you type.
+- **Fewer errors:** rate-limit failures no longer break a search.
+- **More courses:** add up to 200; the first 60 are ranked.
+- **Clearer home page:** tooltips on each box, preset chips for "What matters", DegreeWorks import steps, and a getting-started guide.
+- **New filters:** "Any quarter" and online / in-person.
+- **Better results:** verdict legend, professor picker, "only lecturer" tag, when each course is usually offered, and a sidebar for the search fields.
+- **Plan:** a more visible "Your plan" button, a confirmation when you add a course, and copy or download as CSV.
+- **DegreeWorks:** picks up electives and notes that your data never leaves the browser.

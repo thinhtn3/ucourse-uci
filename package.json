@@ -12,6 +12,7 @@
   "dependencies": {
     "@ai-sdk/google": "^4.0.98",
     "ai": "^7.0.142",
+    "jspdf": "4.2.1",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",

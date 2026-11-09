@@ -184,9 +184,9 @@ export function CourseInput({ value, onChange, onSubmit, onParsed, max, placehol
               e.stopPropagation();
               onChange(value.filter((v) => v.label !== c.label));
             }}
-            className="grid h-4 w-4 place-items-center rounded-full text-fg-muted hover:bg-line-btn hover:text-fg"
+            className="-my-0.5 -mr-0.5 grid h-6 w-6 cursor-pointer place-items-center rounded-full border-0 bg-transparent p-0 text-fg-muted hover:bg-line-btn hover:text-fg disabled:cursor-default"
           >
-            ×
+            <span aria-hidden>×</span>
           </button>
         </span>
       ))}
