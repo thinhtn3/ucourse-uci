@@ -7,6 +7,12 @@ import type { PlanItem, Term } from "@/lib/types";
 const unitsOf = (u: string) => parseFloat(u) || 0;
 const termKey = (t: Term) => `${t.year}|${t.quarter}`;
 const totalUnits = (items: PlanItem[]) => items.reduce((n, i) => n + unitsOf(i.units), 0);
+// True when the item has historical-offering data and this quarter isn't in it. An empty/missing
+// usuallyOffered means "unknown" (new course, or saved before this field existed): never warn then.
+const isUnusual = (item: PlanItem, quarter: string) => {
+  const usual = item.usuallyOffered ?? [];
+  return usual.length > 0 && !usual.some((q) => q === quarter);
+};
 
 function planText(quarters: [Term, PlanItem[]][]) {
   return quarters
@@ -206,57 +212,87 @@ export function Planner({
           const k = termKey(t);
           const items = plans[k] ?? [];
           const units = totalUnits(items);
+          const unusualCount = items.filter((i) => isUnusual(i, t.quarter)).length;
           return (
             <div key={k} className="flex flex-col overflow-hidden rounded-[14px] border border-line">
               <div className="flex items-baseline justify-between gap-3 bg-table-head px-5 py-3">
-                <span className="font-medium">{t.label}</span>
+                <span className="flex items-center gap-2">
+                  <span className="font-medium">{t.label}</span>
+                  {unusualCount > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-warn-bg px-2 py-px text-[11px] font-medium text-warn-fg">
+                      <span aria-hidden>⚠</span> {unusualCount} unusual
+                    </span>
+                  )}
+                </span>
                 <span className={`text-sm ${units > 18 ? "text-seat-full" : "text-fg-muted"}`}>
                   {items.length} {items.length === 1 ? "course" : "courses"} · {units} units
                 </span>
               </div>
               {items.length === 0 && <p className="m-0 px-5 py-3.5 text-sm text-fg-muted">Nothing planned yet. Add courses from the ranking above.</p>}
-              {items.map((i) => (
-                <div key={i.code} className={`flex flex-col gap-2.5 border-t border-line px-5 py-4 text-sm transition-shadow ${ringed === i.code ? "ring-1 ring-accent ring-inset" : ""}`}>
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="font-code text-[13px] font-semibold">{i.code}</span>
-                    <span className="flex-none text-fg-muted">{i.units} units</span>
+              {items.map((i) => {
+                const usual = i.usuallyOffered ?? [];
+                const unusual = isUnusual(i, t.quarter);
+                const ringClass = ringed === i.code ? "ring-1 ring-accent ring-inset" : unusual ? "ring-1 ring-warn-fg ring-inset" : "";
+                return (
+                  <div key={i.code} className={`flex flex-col gap-2.5 border-t border-line px-5 py-4 text-sm transition-shadow ${ringClass}`}>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="flex items-center gap-1.5">
+                        <span className="font-code text-[13px] font-semibold">{i.code}</span>
+                        {unusual && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-warn-bg px-2 py-px text-[11px] font-medium text-warn-fg">
+                            <span aria-hidden>⚠</span> Unusual quarter
+                          </span>
+                        )}
+                      </span>
+                      <span className="flex-none text-fg-muted">{i.units} units</span>
+                    </div>
+                    <span className="text-pretty text-fg-3">{i.title}</span>
+                    {i.instructor && <span className="-mt-1.5 text-[13px] text-fg-muted">{i.instructor}</span>}
+                    {unusual && (
+                      <p role="note" className="m-0 rounded-lg bg-warn-bg px-3 py-2 text-[12px] text-warn-fg">
+                        <span aria-hidden>⚠ </span>
+                        <span className="sr-only">Warning: </span>
+                        Not historically offered in {t.quarter}. Usually offered {usual.join(" · ")}.
+                      </p>
+                    )}
+                    <div className="flex items-center justify-between gap-3">
+                      <select
+                        aria-label={`Move ${i.code} to another quarter`}
+                        value=""
+                        onChange={(e) => {
+                          const to = e.target.value;
+                          if (!to) return;
+                          const dest = terms.find((o) => termKey(o) === to);
+                          onMove(i.code, k, to);
+                          const warn = dest && isUnusual(i, dest.quarter) ? ` Note: ${i.code} isn't usually offered in ${dest.quarter}.` : "";
+                          keepFocus(`Moved ${i.code} to ${dest?.label ?? "another quarter"}.${warn}`);
+                        }}
+                        className="cursor-pointer rounded-lg border border-line-input bg-panel px-2.5 py-1.5 text-[13px] text-fg-muted"
+                      >
+                        <option value="">Move to…</option>
+                        {terms
+                          .filter((o) => termKey(o) !== k)
+                          .map((o) => (
+                            <option key={termKey(o)} value={termKey(o)}>
+                              {o.label}
+                              {isUnusual(i, o.quarter) ? " (unusual)" : ""}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onRemove(i.code, k);
+                          keepFocus(`Removed ${i.code} from ${t.label} plan.`);
+                        }}
+                        className="-mr-1.5 min-h-6 cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-1 text-[13px] text-fg-muted underline"
+                      >
+                        Remove<span className="sr-only"> {i.code}</span>
+                      </button>
+                    </div>
                   </div>
-                  <span className="text-pretty text-fg-3">{i.title}</span>
-                  {i.instructor && <span className="-mt-1.5 text-[13px] text-fg-muted">{i.instructor}</span>}
-                  <div className="flex items-center justify-between gap-3">
-                    <select
-                      aria-label={`Move ${i.code} to another quarter`}
-                      value=""
-                      onChange={(e) => {
-                        const to = e.target.value;
-                        if (!to) return;
-                        onMove(i.code, k, to);
-                        keepFocus(`Moved ${i.code} to ${terms.find((o) => termKey(o) === to)?.label ?? "another quarter"}.`);
-                      }}
-                      className="cursor-pointer rounded-lg border border-line-input bg-panel px-2.5 py-1.5 text-[13px] text-fg-muted"
-                    >
-                      <option value="">Move to…</option>
-                      {terms
-                        .filter((o) => termKey(o) !== k)
-                        .map((o) => (
-                          <option key={termKey(o)} value={termKey(o)}>
-                            {o.label}
-                          </option>
-                        ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onRemove(i.code, k);
-                        keepFocus(`Removed ${i.code} from ${t.label} plan.`);
-                      }}
-                      className="-mr-1.5 min-h-6 cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-1 text-[13px] text-fg-muted underline"
-                    >
-                      Remove<span className="sr-only"> {i.code}</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           );
         })}

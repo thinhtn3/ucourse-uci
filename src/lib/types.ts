@@ -66,7 +66,9 @@ export type ApiErrorCode = "rate_limit" | "no_key" | "bad_request" | "not_found"
 export type ApiError = { error: string; code?: ApiErrorCode; notOffered?: string[]; noData?: string[]; unparsed?: string[]; skipped?: string[] };
 
 // A course saved to a quarter's plan. instructor = professor picked in the row, if any.
-export type PlanItem = { code: string; title: string; units: string; instructor?: string };
+// usuallyOffered = the quarters it's historically run in (from the Row it was added from); undefined for
+// plans saved before this field existed. Empty array means "unknown", same convention as Row.usuallyOffered.
+export type PlanItem = { code: string; title: string; units: string; instructor?: string; usuallyOffered?: Quarter[] };
 
 // /api/courses (autocomplete)
 export type CourseOption = { department: string; number: string; label: string; title: string; units: string; usuallyOffered: Quarter[] };

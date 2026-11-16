@@ -88,7 +88,7 @@ export default function Home() {
     const profs = r.professors ?? [];
     // Default: the only professor, or the model's top-ranked one (professors[0] once assessed).
     const instructor = chosen ?? (profs.length === 1 || profs[0]?.verdict ? profs[0].name : undefined);
-    return { code: r.code, title: r.title, units: r.units, ...(instructor && { instructor }) };
+    return { code: r.code, title: r.title, units: r.units, usuallyOffered: r.usuallyOffered, ...(instructor && { instructor }) };
   };
 
   function addToPlan(rows: Row[], chosen?: string) {
