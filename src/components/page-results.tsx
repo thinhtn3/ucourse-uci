@@ -3,10 +3,10 @@
 import { useState } from "react";
 import type { Mode, ProfessorOption, Quarter, Result, Row, Verdict } from "@/lib/types";
 
-const VERDICT: Record<Verdict, { label: string; fg: string; bg: string; meaning: string }> = {
-  take: { label: "Take it", fg: "text-take-fg", bg: "bg-take-bg", meaning: "strong fit for what you asked" },
-  caveats: { label: "Take with caveats", fg: "text-caveat-fg", bg: "bg-caveat-bg", meaning: "workable, read the downsides" },
-  skip: { label: "Skip / delay", fg: "text-skip-fg", bg: "bg-skip-bg", meaning: "poor fit this quarter" },
+const VERDICT: Record<Verdict, { label: string; fg: string; bg: string }> = {
+  take: { label: "Take it", fg: "text-take-fg", bg: "bg-take-bg" },
+  caveats: { label: "Take with caveats", fg: "text-caveat-fg", bg: "bg-caveat-bg" },
+  skip: { label: "Skip / delay", fg: "text-skip-fg", bg: "bg-skip-bg" },
 };
 
 const EVIDENCE_LABEL = ["No evidence", "Limited evidence", "Some evidence", "Strong evidence"];
@@ -60,7 +60,9 @@ export function Results({
   onRankSkipped,
 }: Props) {
   const any = !!result.term.any;
-  const ranked = result.rows.map((row, i) => ({ row, rank: i + 1 }));
+  // Single-professor courses first, multi-professor courses at the bottom; the model's order is kept within each group (stable sort).
+  const multiProf = (row: Row) => ((row.professors ?? []).length > 1 ? 1 : 0);
+  const ranked = [...result.rows].sort((a, b) => multiProf(a) - multiProf(b)).map((row, i) => ({ row, rank: i + 1 }));
   const visible = ranked.filter(({ row }) => matches(row.mode, modeFilter));
   const unknownHidden = modeFilter === "all" ? 0 : ranked.filter(({ row }) => row.mode === "unknown").length;
   const otherHidden = ranked.length - visible.length - unknownHidden;
@@ -104,14 +106,7 @@ export function Results({
 
       {result.rows.length > 0 && (
         <>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="m-0 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-fg-muted">
-              {(Object.keys(VERDICT) as Verdict[]).map((v) => (
-                <span key={v}>
-                  <span className={`font-medium ${VERDICT[v].fg}`}>{VERDICT[v].label}</span> = {VERDICT[v].meaning}
-                </span>
-              ))}
-            </p>
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <div className="flex items-center gap-3">
               <div role="group" aria-label="Class format" className="flex rounded-full border border-line-btn p-0.5">
                 {FILTERS.map((f) => (
@@ -263,7 +258,7 @@ function TableRow({
 }) {
   const v = VERDICT[row.verdict];
   const assessed = row.assessed !== false;
-  const [more, setMore] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(true);
   const professors = row.professors ?? [];
   const multi = professors.length > 1;
   const top: ProfessorOption | undefined = professors[0];
@@ -273,10 +268,6 @@ function TableRow({
   const usual = row.usuallyOffered ?? [];
   const idBase = `row-panel-${row.code.replace(/[^A-Za-z0-9]/g, "")}`;
   const panelId = idBase;
-  const moreId = `${idBase}-more`;
-  const topTake = row.takeIf[0];
-  const topAvoid = row.avoidIf[0];
-  const hasMore = row.takeIf.length > 1 || row.avoidIf.length > 1 || assessed || row.sources.length > 0;
 
   return (
     <div className={`border-t border-line ${open ? "bg-row-open" : "hover:bg-row-open"}`}>
@@ -360,24 +351,38 @@ function TableRow({
       </button>
       {open && (
         <div id={panelId} className="flex flex-col gap-3 pb-[18px] pl-[68px] pr-5">
-          <p className="m-0 max-w-[70ch] text-pretty text-fg-2">{row.summary}</p>
-          {(topTake || topAvoid) && (
-            <div className="flex max-w-[70ch] flex-col gap-1 text-sm">
-              {topTake && (
-                <p className="m-0 text-fg-2">
-                  <span className="mr-1.5 text-xs font-medium uppercase tracking-[0.05em] text-take-fg">Take if</span>
-                  {topTake}
-                </p>
-              )}
-              {topAvoid && (
-                <p className="m-0 text-fg-2">
-                  <span className="mr-1.5 text-xs font-medium uppercase tracking-[0.05em] text-skip-fg">Avoid if</span>
-                  {topAvoid}
-                </p>
-              )}
-            </div>
-          )}
-          {row.warning && <div className="max-w-[70ch] rounded-[10px] bg-warn-bg px-3.5 py-2.5 text-sm text-warn-fg">{row.warning}</div>}
+          <section className="flex max-w-[62ch] flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => setSummaryOpen((o) => !o)}
+              aria-expanded={summaryOpen}
+              aria-controls={`${idBase}-summary`}
+              className="flex w-fit cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0 text-base font-semibold text-fg hover:text-accent"
+            >
+              Course summary
+              <svg
+                aria-hidden
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                className={`transition-transform duration-200 motion-reduce:transition-none ${summaryOpen ? "rotate-90" : ""}`}
+              >
+                <path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {summaryOpen && (
+              <div id={`${idBase}-summary`} className="flex flex-col gap-3">
+                <p className="m-0 text-pretty text-fg-2">{row.summary}</p>
+                {(row.takeIf.length > 0 || row.avoidIf.length > 0) && (
+                  <div className="flex flex-col gap-2">
+                    <ReasonList label="Take if" tone="text-take-fg" bg="bg-take-bg" items={row.takeIf} />
+                    <ReasonList label="Avoid if" tone="text-skip-fg" bg="bg-skip-bg" items={row.avoidIf} />
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+          {row.warning && <div className="max-w-[62ch] rounded-[10px] bg-warn-bg px-3.5 py-2.5 text-sm text-warn-fg">{row.warning}</div>}
           {multi && (
             <ol className="m-0 flex max-w-[860px] list-none flex-col gap-2.5 p-0" aria-label="Professors ranked best first">
               {professors.map((p, i) => {
@@ -412,7 +417,7 @@ function TableRow({
                       <Stat label="GPA" value={p.gpa} />
                       <Stat label="Seats" value={p.seats} tone={p.seats === "Full" ? "text-seat-full" : "text-take-fg"} />
                       {pm && <Tag>{pm}</Tag>}
-                      {p.difficulty != null && <Stat label="Difficulty" value={`${p.difficulty} / 5`} />}
+                      <Stat label="Difficulty" value={p.difficulty != null ? `${p.difficulty} / 5` : "N/A"} />
                       {p.rmpUrl && (
                         <a href={p.rmpUrl} target="_blank" rel="noopener noreferrer" className="text-[13px]">
                           RateMyProfessors<span className="sr-only"> profile for {p.name} (opens in new tab)</span>
@@ -426,27 +431,8 @@ function TableRow({
               })}
             </ol>
           )}
-          {hasMore && (
-            <div>
-              <button
-                type="button"
-                onClick={() => setMore((m) => !m)}
-                aria-expanded={more}
-                aria-controls={moreId}
-                className="cursor-pointer rounded-[8px] border-0 bg-transparent px-0 py-1 text-[13px] text-fg-3 underline decoration-dotted underline-offset-4 hover:text-fg"
-              >
-                {more ? "Fewer details" : "More details"}
-              </button>
-            </div>
-          )}
-          {more && (
-            <div id={moreId} className="flex flex-col gap-3">
-              {(row.takeIf.length > 0 || row.avoidIf.length > 0) && (
-                <div className="grid max-w-[70ch] gap-3 sm:grid-cols-2">
-                  <ReasonList title="Take this course if" tone="text-take-fg" items={row.takeIf} />
-                  <ReasonList title="Avoid this course if" tone="text-skip-fg" items={row.avoidIf} />
-                </div>
-              )}
+          {(assessed || row.sources.length > 0) && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               {assessed && (
                 <span className="flex items-center gap-1.5">
                   {[0, 1, 2].map((d) => (
@@ -456,7 +442,7 @@ function TableRow({
                 </span>
               )}
               {row.sources.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <span className="flex flex-wrap items-center gap-1.5">
                   <span className="text-[13px] text-fg-label">Sources</span>
                   {row.sources.map((src) => (
                     <a
@@ -471,7 +457,7 @@ function TableRow({
                       <span aria-hidden> ↗</span>
                     </a>
                   ))}
-                </div>
+                </span>
               )}
             </div>
           )}
@@ -493,19 +479,16 @@ function TableRow({
   );
 }
 
-function ReasonList({ title, tone, items }: { title: string; tone: string; items: string[] }) {
+function ReasonList({ label, tone, bg, items }: { label: string; tone: string; bg: string; items: string[] }) {
+  if (!items.length) return null;
   return (
-    <div className="flex flex-col gap-1.5 rounded-[10px] bg-panel px-3.5 py-3">
-      <span className={`text-xs font-medium uppercase tracking-[0.05em] ${tone}`}>{title}</span>
-      {items.length ? (
-        <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm text-fg-2">
-          {items.map((t) => (
-            <li key={t}>{t}</li>
-          ))}
-        </ul>
-      ) : (
-        <span className="text-sm text-fg-muted">Nothing stands out.</span>
-      )}
+    <div className={`flex flex-col gap-1.5 rounded-[10px] px-3.5 py-2.5 text-sm ${bg}`}>
+      <span className={`text-xs font-medium uppercase tracking-[0.05em] ${tone}`}>{label}</span>
+      <ul className="m-0 flex list-none flex-col gap-1 p-0 text-fg-2">
+        {items.map((t) => (
+          <li key={t}>{t}</li>
+        ))}
+      </ul>
     </div>
   );
 }

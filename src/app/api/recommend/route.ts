@@ -53,9 +53,9 @@ const Request = z.object({
 const Recommendation = z.object({
   course: z.string().describe("The course label exactly as given in the data, e.g. 'I&C SCI 33'"),
   verdict: z.enum(["take", "caveats", "skip"]).describe("take = strong fit; caveats = workable with real downsides; skip = poor fit or better to delay"),
-  takeIf: z.array(z.string()).describe("2-3 short, concrete reasons to take this course, each a 'you' condition grounded in the data, e.g. 'You want a clear lecturer (4.6 on RateMyProfessors)'"),
-  avoidIf: z.array(z.string()).describe("1-3 short, concrete reasons to avoid it, same style, grounded in the data, e.g. 'You need a light load: students call the weekly projects heavy'. Empty only if the data shows no real downside"),
-  summary: z.string().describe("One or two sentences: the overall call for this student, tying the evidence to what they asked for"),
+  takeIf: z.array(z.string()).max(2).describe("At most 2 reasons to take this course, each a 'you' condition under 12 words, e.g. 'You want a clear lecturer'. Do not repeat numbers the table already shows (GPA, rating, seats)"),
+  avoidIf: z.array(z.string()).max(2).describe("At most 2 reasons to avoid it, same style and length, e.g. 'You need a light load'. Empty only if the data shows no real downside"),
+  summary: z.string().describe("ONE short sentence (under 25 words): the overall call for this student. Must not restate takeIf/avoidIf or the GPA/rating numbers shown in the table"),
   warning: z.string().describe("One short warning (full section, prerequisite, required course, workload) or an empty string"),
   evidence: z.enum(["none", "limited", "some", "strong"]).describe("How much data backs this call"),
   professors: z
@@ -63,7 +63,7 @@ const Recommendation = z.object({
       z.object({
         name: z.string().describe("Exact name from professorsThisQuarter"),
         verdict: z.enum(["take", "caveats", "skip"]).describe("Verdict for taking the course with this professor, grounded in their own data"),
-        note: z.string().describe("One short line on why, from this professor's own data"),
+        note: z.string().describe("A short clause (under 15 words) adding something the stats row does not show, e.g. 'Lectures described as boring'. Do not repeat GPA, rating, difficulty or take-again numbers. Empty string if there is nothing to add"),
       }),
     )
     .describe("Every professor teaching this course this quarter (exact name from professorsThisQuarter), best fit first, each with their own verdict and one short line why; empty if only STAFF"),
@@ -209,7 +209,7 @@ const SYSTEM =
   "listed, say the instructor isn't announced yet. Do not mention that only one professor or lecturer teaches the course. Rank every course for this student's stated " +
   "preferences, best fit first, and set evidence honestly (few sections, few ratings, or no RMP data means limited or none). GPA is " +
   "a proxy for difficulty, not quality. If several candidates satisfy the same requirement, rank them against each other. Keep every " +
-  "line short and concrete; the summary must not repeat the takeIf/avoidIf lines. For each course, fill `professors` with every " +
+  "line very short and concrete; the summary must not repeat the takeIf/avoidIf lines, and no text may restate numbers (GPA, rating, difficulty, seats) that the UI already displays. For each course, fill `professors` with every " +
   "professor in professorsThisQuarter (exact names), best fit first, each with their own verdict and a one-line note grounded in THAT " +
   "professor's own grade history and ratings (not blended with the others). The course-level verdict is the verdict for the best " +
   "professor option, and takeIf/avoidIf describe that option. With one professor, professors has just that person; with only STAFF, leave it empty.";
@@ -254,7 +254,7 @@ function rankBatch(batch: Found[], ctx: Ctx): Promise<Assessment[]> {
     [...ctx.currentlyTaking].sort().join(","),
     batch.map((g) => `${g.course}:${g.professorsThisQuarter.map((p) => p.name).join("/")}`).sort().join(","),
   ];
-  return cached(`rank3:${parts.join("|")}`, HOUR, () => callModel(batch, ctx));
+  return cached(`rank4:${parts.join("|")}`, HOUR, () => callModel(batch, ctx));
 }
 
 const TIER: Record<Verdict, number> = { take: 0, caveats: 1, skip: 2 };
